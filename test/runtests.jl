@@ -1,4 +1,5 @@
 using StructArrays
+using OffsetArrays: OffsetArray
 import Tables, PooledArrays, WeakRefStrings
 using Test
 
@@ -36,13 +37,6 @@ end
     @test all(v.b .== v_pooled.b)
     @test !isa(v_pooled.a, PooledArrays.PooledArray)
     @test isa(v_pooled.b, PooledArrays.PooledArray)
-    @test v_pooled == StructArrays.pool(v)
-    s = WeakRefStrings.StringArray(["a", "b", "c"])
-    @test StructArrays.pool(s) isa PooledArrays.PooledArray{String}
-    @test StructArrays.pool(s)[1] == "a"
-    @test StructArrays.pool(s)[2] == "b"
-    @test StructArrays.pool(s)[3] == "c"
-    @test StructArrays.pool(StructArrays.pool(s)) == StructArrays.pool(s)
 end
 
 @testset "roweq" begin
@@ -80,6 +74,16 @@ end
     t = StructArray(a=[3, 4], b=["c", "d"])
     copyto!(s, t)
     @test s == t
+
+    a = WeakRefStrings.StringVector(["a", "b", "c"])
+    b = PooledArrays.PooledArray(["1", "2", "3"])
+    c = [:a, :b, :c]
+    s = StructArray(a=a, b=b, c=c)
+    ref = StructArrays.refs(s)
+    @test ref[1].a isa WeakRefStrings.WeakRefString{UInt8}
+    @test ref[1].b isa Integer
+    Base.permute!!(ref, sortperm(s))
+    @test issorted(s)
 end
 
 @testset "sortperm" begin
@@ -459,6 +463,30 @@ end
     @test v.b == [j for i in 1:3, j in 1:4]
 end
 
+@testset "collectoffset" begin
+    s = OffsetArray([(a=1,) for i in 1:10], -3)
+    sa = StructArray(s)
+    @test sa isa StructArray
+    @test axes(sa) == (-2:7,)
+    @test sa.a == fill(1, -2:7)
+
+    sa = StructArray(i for i in s)
+    @test sa isa StructArray
+    @test axes(sa) == (-2:7,)
+    @test sa.a == fill(1, -2:7)
+end
+
+@testset "reshape" begin
+    s = StructArray(a=[1,2,3,4], b=["a","b","c","d"])
+    rs = reshape(s, (2, 2))
+    @test rs.a == [1 3; 2 4]
+    @test rs.b == ["a" "c"; "b" "d"]
+
+    os = reshape(s, -1:2)
+    @test os.a == OffsetArray([1,2,3,4], -2)
+    @test os.b == OffsetArray(["a","b","c","d"], -2)
+end
+
 @testset "lazy" begin
     s = StructArray(rand(ComplexF64, 10, 10))
     rows = LazyRows(s)
@@ -468,4 +496,16 @@ end
     rows[13].re = -12
     @test !all(t -> t.re >= 0, s)
     @test !all(t -> t.re >= 0, rows)
+end
+
+@testset "refs" begin
+    s = PooledArrays.PooledArray(["a", "b", "c", "c"])
+    @test StructArrays.refs(s) == UInt8.([1, 2, 3, 3])
+
+    s = WeakRefStrings.StringArray(["a", "b"])
+    @test StructArrays.refs(s) isa WeakRefStrings.StringArray{WeakRefStrings.WeakRefString{UInt8}}
+    @test all(isequal.(s, StructArrays.refs(s)))
+    s = WeakRefStrings.StringArray(["a", missing])
+    @test StructArrays.refs(s) isa WeakRefStrings.StringArray{Union{WeakRefStrings.WeakRefString{UInt8}, Missing}}
+    @test all(isequal.(s, StructArrays.refs(s)))
 end
