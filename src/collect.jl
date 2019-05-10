@@ -22,8 +22,13 @@ ArrayInitializer(unwrap = t->false) = ArrayInitializer(unwrap, default_array)
 (s::ArrayInitializer)(S, d) = s.unwrap(S) ? buildfromschema(typ -> s(typ, d), S) : s.default_array(S, d)
 
 _reshape(v, itr) = _reshape(v, itr, Base.IteratorSize(itr))
-_reshape(v, itr, ::Base.HasShape) = reshape(v, axes(itr))
+_reshape(v, itr, ::Base.HasShape) = reshapestructarray(v, axes(itr))
 _reshape(v, itr, ::Union{Base.HasLength, Base.SizeUnknown}) = v
+
+# temporary workaround before it gets easier to support reshape with offset axis
+reshapestructarray(v::AbstractArray, d) = reshape(v, d)
+reshapestructarray(v::StructArray{T}, d) where {T} =
+    StructArray{T}(map(x -> reshapestructarray(x, d), fieldarrays(v)))
 
 """
 `collect_structarray(itr, fr=iterate(itr); initializer = default_initializer)`
@@ -58,7 +63,7 @@ function collect_structarray(itr, elem, sz::Union{Base.HasShape, Base.HasLength}
     _reshape(v, itr, sz)
 end
 
-function collect_to_structarray!(dest::AbstractArray{T}, itr, offs, st) where {T}
+function collect_to_structarray!(dest::AbstractArray, itr, offs, st)
     # collect to dest array, checking the type of each result. if a result does not
     # match, widen the result type and re-dispatch.
     i = offs
@@ -66,7 +71,7 @@ function collect_to_structarray!(dest::AbstractArray{T}, itr, offs, st) where {T
         elem = iterate(itr, st)
         elem === nothing && break
         el, st = elem
-        if iseltype(el, dest)
+        if iscompatible(el, dest)
             @inbounds dest[i] = el
             i += 1
         else
@@ -85,13 +90,13 @@ function collect_structarray(itr, elem, ::Base.SizeUnknown; initializer = defaul
     grow_to_structarray!(dest, itr, iterate(itr, st))
 end
 
-function grow_to_structarray!(dest::AbstractArray{T}, itr, elem = iterate(itr)) where {T}
+function grow_to_structarray!(dest::AbstractArray, itr, elem = iterate(itr))
     # collect to dest array, checking the type of each result. if a result does not
     # match, widen the result type and re-dispatch.
     i = length(dest)+1
     while elem !== nothing
         el, st = elem
-        if iseltype(el, dest)
+        if iscompatible(el, dest)
             push!(dest, el)
             elem = iterate(itr, st)
             i += 1
@@ -104,27 +109,22 @@ function grow_to_structarray!(dest::AbstractArray{T}, itr, elem = iterate(itr)) 
     return dest
 end
 
-function to_structarray(::Type{T}, nt::C) where {T, C}
-    S = createtype(T, C)
-    StructArray{S}(nt)
+widenstructarray(dest::AbstractArray{S}, i, el::T) where {S, T} = widenstructarray(dest, i, _promote_typejoin(S, T))
+
+function widenstructarray(dest::StructArray, i, ::Type{T}) where {T}
+    sch = hasfields(T) ? staticschema(T) : nothing
+    sch !== nothing && fieldnames(sch) == propertynames(dest) || return widenarray(dest, i, T)
+    types = ntuple(x -> fieldtype(sch, x), fieldcount(sch))
+    cols = Tuple(fieldarrays(dest))
+    newcols = map((a, b) -> widenstructarray(a, i, b), cols, types)
+    return StructArray{T}(newcols)
 end
 
-function widenstructarray(dest::StructArray{T}, i, el::S) where {T, S}
-    fs = fields(S)
-    if fs === fields(T)
-        new_cols = (widenstructarray(fieldarrays(dest)[ind], i, getfieldindex(el, f, ind)) for (ind, f) in enumerate(fs))
-        nt = NamedTuple{fs}(Tuple(new_cols))
-        v = to_structarray(T, nt)
-    else
-        widenarray(dest, i, el)
-    end
-end
+widenstructarray(dest::AbstractArray, i, ::Type{T}) where {T} = widenarray(dest, i, T)
 
-widenstructarray(dest::AbstractArray, i, el) = widenarray(dest, i, el)
-
-function widenarray(dest::AbstractArray{T}, i, el::S) where {S, T}
-    S <: T && return dest
-    new = similar(dest, Base.promote_typejoin(S, T), length(dest))
+widenarray(dest::AbstractArray{T}, i, ::Type{T}) where {T} = dest
+function widenarray(dest::AbstractArray, i, ::Type{T}) where T
+    new = similar(dest, T, length(dest))
     copyto!(new, 1, dest, 1, i-1)
     new
 end

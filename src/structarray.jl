@@ -1,12 +1,12 @@
 """
 A type that stores an array of structures as a structure of arrays.
 # Fields:
-- `fieldarrays`: a named tuple of arrays. Also `fieldarrays(x)`
+- `fieldarrays`: a (named) tuple of arrays. Also `fieldarrays(x)`
 """
-struct StructArray{T, N, C<:NamedTuple} <: AbstractArray{T, N}
+struct StructArray{T, N, C<:Tup, I} <: AbstractArray{T, N}
     fieldarrays::C
 
-    function StructArray{T, N, C}(c) where {T, N, C<:NamedTuple}
+    function StructArray{T, N, C}(c) where {T, N, C<:Tup}
         if length(c) > 0
             ax = axes(c[1])
             length(ax) == N || error("wrong number of dimensions")
@@ -14,46 +14,58 @@ struct StructArray{T, N, C<:NamedTuple} <: AbstractArray{T, N}
                 axes(c[i]) == ax || error("all field arrays must have same shape")
             end
         end
-        new{T, N, C}(c)
+        new{T, N, C, _best_index(c...)}(c)
     end
 end
 
-_dims(c::NamedTuple) = length(axes(c[1]))
-_dims(c::NamedTuple{(), Tuple{}}) = 1
+_best_index() = Int
+_best_index(col::AbstractArray, cols::AbstractArray...) = _best_index(IndexStyle(col, cols...), col)
+_best_index(::IndexLinear, ::AbstractArray) = Int
+_best_index(::IndexCartesian, ::AbstractArray{T, N}) where {T, N} = CartesianIndex{N}
+_best_index(::Type{StructArray{T, N, C, I}}) where {T, N, C, I} = I
+_indexstyle(::Type{Int}) = IndexLinear()
+_indexstyle(::Type{CartesianIndex{N}}) where {N} = IndexCartesian()
 
-StructArray{T}(c::C) where {T, C<:Tuple} = StructArray{T}(NamedTuple{fields(T)}(c))
-StructArray{T}(c::C) where {T, C<:NamedTuple} = StructArray{T, _dims(c), C}(c)
-StructArray{T}(c::C) where {T, C<:Pair} = StructArray{T}(Tuple(c))
+_dims(c::Tup) = length(axes(c[1]))
+_dims(c::EmptyTup) = 1
+
+function StructArray{T}(c::C) where {T, C<:Tup}
+    cols = strip_params(staticschema(T))(c)
+    StructArray{T, _dims(cols), typeof(cols)}(cols)
+end
+
 StructArray(c::C) where {C<:NamedTuple} = StructArray{eltypes(C)}(c)
 StructArray(c::Tuple; names = nothing) = _structarray(c, names)
-StructArray(c::Pair{P, Q}) where {P, Q} = StructArray{Pair{eltype(P), eltype(Q)}}(c)
 
 StructArray{T}(; kwargs...) where {T} = StructArray{T}(values(kwargs))
 StructArray(; kwargs...) = StructArray(values(kwargs))
-
-@deprecate(StructArray{T}(args...) where {T}, StructArray{T}(args))
 
 _structarray(args::T, ::Nothing) where {T<:Tuple} = StructArray{eltypes(T)}(args)
 _structarray(args::Tuple, names) = _structarray(args, Tuple(names))
 _structarray(args::Tuple, ::Tuple) = _structarray(args, nothing)
 _structarray(args::NTuple{N, Any}, names::NTuple{N, Symbol}) where {N} = StructArray(NamedTuple{names}(args))
 
-const StructVector{T, C<:NamedTuple} = StructArray{T, 1, C}
+const StructVector{T, C<:Tup, I} = StructArray{T, 1, C, I}
 StructVector{T}(args...; kwargs...) where {T} = StructArray{T}(args...; kwargs...)
 StructVector(args...; kwargs...) = StructArray(args...; kwargs...)
 
-_indexstyle(::Type{Tuple{}}) = IndexStyle(Union{})
-_indexstyle(::Type{T}) where {T<:Tuple} = IndexStyle(IndexStyle(tuple_type_head(T)), _indexstyle(tuple_type_tail(T)))
-_indexstyle(::Type{NamedTuple{names, types}}) where {names, types} = _indexstyle(types)
+Base.IndexStyle(::Type{S}) where {S<:StructArray} = _indexstyle(_best_index(S))
 
-function Base.IndexStyle(::Type{StructArray{T, N, C}}) where {T, N, C}
-    _indexstyle(C)
+function _undef_array(::Type{T}, sz; unwrap = t -> false) where {T}
+    if unwrap(T)
+        return StructArray{T}(undef, sz; unwrap = unwrap)
+    else
+        return Array{T}(undef, sz)
+    end
 end
 
-_undef_array(::Type{T}, sz; unwrap = t -> false) where {T} = unwrap(T) ? StructArray{T}(undef, sz; unwrap = unwrap) : Array{T}(undef, sz)
-
-_similar(v::AbstractArray, ::Type{Z}; unwrap = t -> false) where {Z} =
-    unwrap(Z) ? buildfromschema(typ -> _similar(v, typ; unwrap = unwrap), Z) : similar(v, Z)
+function _similar(v::AbstractArray, ::Type{Z}; unwrap = t -> false) where {Z}
+    if unwrap(Z)
+        return buildfromschema(typ -> _similar(v, typ; unwrap = unwrap), Z)
+    else
+        return similar(v, Z)
+    end
+end
 
 function StructArray{T}(::Base.UndefInitializer, sz::Dims; unwrap = t -> false) where {T}
     buildfromschema(typ -> _undef_array(typ, sz; unwrap = unwrap), T)
@@ -64,7 +76,10 @@ function similar_structarray(v::AbstractArray, ::Type{Z}; unwrap = t -> false) w
     buildfromschema(typ -> _similar(v, typ; unwrap = unwrap), Z)
 end
 
-StructArray(v; unwrap = t -> false) = collect_structarray(v; initializer = StructArrayInitializer(unwrap))
+function StructArray(v; unwrap = t -> false)::StructArray
+    collect_structarray(v; initializer = StructArrayInitializer(unwrap))
+end
+
 function StructArray(v::AbstractArray{T}; unwrap = t -> false) where {T}
     s = similar_structarray(v, T; unwrap = unwrap)
     for i in eachindex(v)
@@ -80,9 +95,8 @@ Base.convert(::Type{StructArray}, v::StructArray) = v
 Base.convert(::Type{StructVector}, v::AbstractVector) = StructVector(v)
 Base.convert(::Type{StructVector}, v::StructVector) = v
 
-function Base.similar(::Type{StructArray{T, N, C}}, sz::Dims) where {T, N, C}
-    cols = map_params(typ -> similar(typ, sz), C)
-    StructArray{T}(cols)
+function Base.similar(::Type{<:StructArray{T, <:Any, C}}, sz::Dims) where {T, C}
+    buildfromschema(typ -> similar(typ, sz), T, C)
 end
 
 Base.similar(s::StructArray, sz::Base.DimOrInd...) = similar(s, Base.to_shape(sz))
@@ -95,7 +109,7 @@ end
 `fieldarrays(s::StructArray)`
 
 Return the field arrays corresponding to the various entry of the struct as a named tuple.
-If the struct has no names (e.g. a tuple) automatic names are assigned (`:x1, :x2, ...`).
+If the struct has no names (e.g. a tuple), return the arrays as a tuple.
 
 ## Examples
 
@@ -110,39 +124,49 @@ fieldarrays(s::StructArray) = getfield(s, :fieldarrays)
 
 Base.getproperty(s::StructArray, key::Symbol) = getfield(fieldarrays(s), key)
 Base.getproperty(s::StructArray, key::Int) = getfield(fieldarrays(s), key)
-Base.propertynames(s::StructArray) = fieldnames(typeof(fieldarrays(s)))
+Base.propertynames(s::StructArray) = propertynames(fieldarrays(s))
 staticschema(::Type{<:StructArray{T}}) where {T} = staticschema(T)
 
 Base.size(s::StructArray) = size(fieldarrays(s)[1])
-Base.size(s::StructArray{<:Any, <:Any, <:NamedTuple{(), Tuple{}}}) = (0,)
+Base.size(s::StructArray{<:Any, <:Any, <:EmptyTup}) = (0,)
 Base.axes(s::StructArray) = axes(fieldarrays(s)[1])
-Base.axes(s::StructArray{<:Any, <:Any, <:NamedTuple{(), Tuple{}}}) = (1:0,)
+Base.axes(s::StructArray{<:Any, <:Any, <:EmptyTup}) = (1:0,)
 
-@generated function Base.getindex(x::StructArray{T, N, NamedTuple{names, types}}, I::Int...) where {T, N, names, types}
-    args = [:(getfield(cols, $i)[I...]) for i in 1:length(names)]
-    return quote
-        cols = fieldarrays(x)
-        @boundscheck checkbounds(x, I...)
-        @inbounds $(Expr(:call, :createinstance, :T, args...))
+get_ith(cols::NamedTuple, I...) = get_ith(Tuple(cols), I...)
+function get_ith(cols::NTuple{N, Any}, I...) where N
+    ntuple(N) do i
+        @inbounds res = getfield(cols, i)[I...]
+        return res
     end
 end
 
-function Base.getindex(s::StructArray{T, N, C}, I::Union{Int, AbstractArray, Colon}...) where {T, N, C}
-    StructArray{T}(map(v -> getindex(v, I...), fieldarrays(s)))
+Base.@propagate_inbounds function Base.getindex(x::StructArray{T, <:Any, <:Any, CartesianIndex{N}}, I::Vararg{Int, N}) where {T, N}
+    cols = fieldarrays(x)
+    @boundscheck checkbounds(x, I...)
+    return createinstance(T, get_ith(cols, I...)...)
+end
+
+Base.@propagate_inbounds function Base.getindex(x::StructArray{T, <:Any, <:Any, Int}, I::Int) where {T}
+    cols = fieldarrays(x)
+    @boundscheck checkbounds(x, I)
+    return createinstance(T, get_ith(cols, I)...)
 end
 
 function Base.view(s::StructArray{T, N, C}, I...) where {T, N, C}
     StructArray{T}(map(v -> view(v, I...), fieldarrays(s)))
 end
 
-function Base.setindex!(s::StructArray, vals, I::Int...)
+Base.@propagate_inbounds function Base.setindex!(s::StructArray{<:Any, <:Any, <:Any, CartesianIndex{N}}, vals, I::Vararg{Int, N}) where {N}
     @boundscheck checkbounds(s, I...)
-    @inbounds foreachfield((col, val) -> (col[I...] = val), s, vals)
+    foreachfield((col, val) -> (@inbounds col[I...] = val), s, vals)
     s
 end
 
-@inline getfieldindex(v::Tuple, field::Symbol, index::Integer) = getfield(v, index)
-@inline getfieldindex(v, field::Symbol, index::Integer) = getproperty(v, field)
+Base.@propagate_inbounds function Base.setindex!(s::StructArray{<:Any, <:Any, <:Any, Int}, vals, I::Int)
+    @boundscheck checkbounds(s, I)
+    foreachfield((col, val) -> (@inbounds col[I] = val), s, vals)
+    s
+end
 
 function Base.push!(s::StructArray, vals)
     foreachfield(push!, s, vals)
@@ -156,10 +180,9 @@ end
 
 Base.copyto!(I::StructArray, J::StructArray) = (foreachfield(copyto!, I, J); I)
 
-function Base.cat(args::StructArray...; dims)
-    f = key -> cat((getproperty(t, key) for t in args)...; dims=dims)
-    T = mapreduce(eltype, promote_type, args)
-    StructArray{T}(map(f, fields(eltype(args[1]))))
+function Base.copyto!(I::StructArray, doffs::Integer, J::StructArray, soffs::Integer, n::Integer)
+    foreachfield((dest, src) -> copyto!(dest, doffs, src, soffs, n), I, J)
+    return I
 end
 
 function Base.resize!(s::StructArray, i::Integer)
@@ -173,12 +196,12 @@ function Base.empty!(s::StructArray)
     foreachfield(empty!, s)
 end
 
-for op in [:hcat, :vcat]
+for op in [:cat, :hcat, :vcat]
     @eval begin
-        function Base.$op(args::StructArray...)
-            f = key -> $op((getproperty(t, key) for t in args)...)
+        function Base.$op(args::StructArray...; kwargs...)
+            f = key -> $op((getproperty(t, key) for t in args)...; kwargs...)
             T = mapreduce(eltype, promote_type, args)
-            StructArray{T}(map(f, fields(eltype(args[1]))))
+            StructArray{T}(map(f, propertynames(args[1])))
         end
     end
 end
@@ -189,14 +212,17 @@ function Base.reshape(s::StructArray{T}, d::Dims) where {T}
     StructArray{T}(map(x -> reshape(x, d), fieldarrays(s)))
 end
 
-@static if !isdefined(Base, :IdentityUnitRange)
-    const IdentityUnitRange = Base.Slice
-else
-    using Base: IdentityUnitRange
+function showfields(io::IO, fields::NTuple{N, Any}) where N
+    print(io, "(")
+    for (i, field) in enumerate(fields)
+        Base.showarg(io, fields[i], false)
+        i < N && print(io, ", ")
+    end
+    print(io, ")")
 end
 
-for typ in [:Integer, :(Base.OneTo), :UnitRange, :IdentityUnitRange]
-    @eval function Base.reshape(s::StructArray{T}, d::Tuple{$typ, Vararg{$typ}}) where {T}
-        StructArray{T}(map(x -> reshape(x, d), fieldarrays(s)))
-    end
+function Base.showarg(io::IO, s::StructArray{T}, toplevel) where T
+    print(io, "StructArray")
+    showfields(io, Tuple(fieldarrays(s)))
+    toplevel && print(io, " with eltype ", T)
 end

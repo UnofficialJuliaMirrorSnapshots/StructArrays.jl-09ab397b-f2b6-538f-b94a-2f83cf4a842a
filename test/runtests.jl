@@ -1,4 +1,5 @@
 using StructArrays
+using StructArrays: staticschema, iscompatible, _promote_typejoin
 using OffsetArrays: OffsetArray
 import Tables, PooledArrays, WeakRefStrings
 using Test
@@ -18,13 +19,49 @@ end
     @test StructArrays.propertynames(StructArrays.fieldarrays(t)) == (:a, :b)
 end
 
+@testset "utils" begin
+    t = StructArray(rand(ComplexF64, 2, 2))
+    T = staticschema(typeof(t))
+    @test StructArrays.eltypes(T) == NamedTuple{(:re, :im), Tuple{Float64, Float64}}
+    @test StructArrays.map_params(eltype, T) == NamedTuple{(:re, :im), Tuple{Float64, Float64}}
+    @test StructArrays.map_params(eltype, StructArrays.astuple(T)) == Tuple{Float64, Float64}
+    @test !iscompatible(typeof((1, 2)), typeof(([1],)))
+    @test iscompatible(typeof((1, 2)), typeof(([1], [2])))
+    @test !iscompatible(typeof((1, 2)), typeof(([1.1], [2])))
+    @test iscompatible(typeof(()), typeof(()))
+    @test _promote_typejoin(Tuple{Int, Missing}, Tuple{Int, Int}) == Tuple{Int, Union{Int, Missing}}
+    @test _promote_typejoin(Pair{Int, Missing}, Pair{Int, Int}) == Pair{Int, Union{Int, Missing}}
+    @test _promote_typejoin(NamedTuple{(:a, :b), Tuple{Int, Missing}}, NamedTuple{(:a, :b), Tuple{Int, Int}}) == NamedTuple{(:a, :b), Tuple{Int, Union{Int, Missing}}}
+    @test _promote_typejoin(Tuple{}, Tuple{}) == Tuple{}
+    @test _promote_typejoin(Tuple{Int}, Tuple{Int, Int}) == Tuple{Int, Vararg{Int, N} where N}
+
+    @test StructArrays.astuple(Tuple{Int}) == Tuple{Int}
+    @test StructArrays.strip_params(Tuple{Int}) == Tuple
+    @test StructArrays.astuple(NamedTuple{(:a,), Tuple{Float64}}) == Tuple{Float64}
+    @test StructArrays.strip_params(NamedTuple{(:a,), Tuple{Float64}}) == NamedTuple{(:a,)}
+end
+
 @testset "indexstyle" begin
     @inferred IndexStyle(StructArray(a=rand(10,10), b=view(rand(100,100), 1:10, 1:10)))
-    T = typeof(StructArray(a=rand(10,10), b=view(rand(100,100), 1:10, 1:10)))
+    s = StructArray(a=rand(10,10), b=view(rand(100,100), 1:10, 1:10))
+    T = typeof(s)
     @test IndexStyle(T) === IndexCartesian()
+    @test StructArrays._best_index(T) == CartesianIndex{2}
+    @test s[100] == s[10, 10] == (a=s.a[10,10], b=s.b[10,10])
+    s[100] = (a=1, b=1)
+    @test s[100] == s[10, 10] == (a=1, b=1)
+    s[10, 10] = (a=0, b=0)
+    @test s[100] == s[10, 10] == (a=0, b=0)
     @inferred IndexStyle(StructArray(a=rand(10,10), b=rand(10,10)))
-    T = typeof(StructArray(a=rand(10,10), b=rand(10,10)))
+    s = StructArray(a=rand(10,10), b=rand(10,10))
+    T = typeof(s)
     @test IndexStyle(T) === IndexLinear()
+    @test StructArrays._best_index(T) == Int
+    @test s[100] == s[10, 10] == (a=s.a[10,10], b=s.b[10,10])
+    s[100] = (a=1, b=1)
+    @test s[100] == s[10, 10] == (a=1, b=1)
+    s[10, 10] = (a=0, b=0)
+    @test s[100] == s[10, 10] == (a=0, b=0)
 end
 
 @testset "replace_storage" begin
@@ -52,13 +89,13 @@ end
     @test StructArrays.roweq(strs, 1, 2)
     @test !StructArrays.roweq(strs, 1, 3)
     @test !StructArrays.roweq(strs, 2, 3)
-end
 
-@testset "namedtuple" begin
-    @inferred StructArrays.to_namedtuple(1+2im)
-    @test StructArrays.to_namedtuple(1+2im) == (re = 1, im = 2)
-    @test StructArrays.to_namedtuple((a=1,)) == (a=1,)
-    @test StructArrays.to_namedtuple((1, 2, :s)) == (x1=1, x2=2, x3=:s)
+    a = ["a", "c", "z", "a"]
+    b = PooledArrays.PooledArray(["p", "y", "a", "x"])
+    t = StructArray((a, b))
+    @test StructArrays.rowcmp(s, 4, t, 4) == 0
+    @test StructArrays.rowcmp(s, 1, t, 1) == 1
+    @test StructArrays.rowcmp(s, 2, t, 3) == -1
 end
 
 @testset "permute" begin
@@ -73,6 +110,11 @@ end
     s = StructArray(a=[1, 2], b=["a", "b"])
     t = StructArray(a=[3, 4], b=["c", "d"])
     copyto!(s, t)
+    @test s == t
+
+    s = StructArray(a=[1, 2], b=["a", "b"])
+    t = StructArray(a=[3, 4], b=["c", "d"])
+    copyto!(s, 1, t, 1, 2)
     @test s == t
 
     a = WeakRefStrings.StringVector(["a", "b", "c"])
@@ -132,6 +174,9 @@ end
     a = [1, 2, 1, 1, 0, 9, -100]
     b = [-2, 12, 1, 1, 0, 11, 9]
     itr = StructArrays.GroupJoinPerm(a, b)
+    @test Base.IteratorSize(itr) == Base.SizeUnknown()
+    @test Base.IteratorEltype(itr) == Base.HasEltype()
+    @test eltype(itr) == Tuple{UnitRange{Int}, UnitRange{Int}}
     s = StructArray(itr)
     as, bs = fieldarrays(s)
     @test as == [1:1, 1:0, 2:2, 3:5, 6:6, 7:7, 1:0, 1:0]
@@ -257,7 +302,6 @@ end
 end
 
 f_infer() = StructArray{ComplexF64}((rand(2,2), rand(2,2)))
-
 g_infer() = StructArray([(a=(b="1",), c=2)], unwrap = t -> t <: NamedTuple)
 tup_infer() = StructArray([(1, 2), (3, 4)])
 cols_infer() = StructArray(([1, 2], [1.2, 2.3]))
@@ -267,10 +311,15 @@ cols_infer() = StructArray(([1, 2], [1.2, 2.3]))
     @inferred g_infer()
     @test g_infer().a.b == ["1"]
     s = @inferred tup_infer()
-    @test Tables.columns(s) == (x1 = [1, 3], x2 = [2, 4])
+    @test fieldarrays(s) == ([1, 3], [2, 4])
     @test s[1] == (1, 2)
     @test s[2] == (3, 4)
     @inferred cols_infer()
+end
+
+@testset "to_(named)tuple" begin
+    @test StructArrays.to_tup((1, 2, 3)) == (1, 2, 3)
+    @test StructArrays.to_tup(2 + 3im) == (re = 2, im = 3)
 end
 
 @testset "propertynames" begin
@@ -286,8 +335,11 @@ end
     @test Tables.columns(s).a == [1]
     @test Tables.columns(s).b == ["test"]
     @test Tables.istable(s)
+    @test Tables.istable(typeof(s))
     @test Tables.rowaccess(s)
+    @test Tables.rowaccess(typeof(s))
     @test Tables.columnaccess(s)
+    @test Tables.columnaccess(typeof(s))
 end
 
 struct S
@@ -296,7 +348,7 @@ struct S
     S(x) = new(x, x)
 end
 
-StructArrays.SkipConstructor(::Type{<:S}) = true
+StructArrays.createinstance(::Type{<:S}, x, y) = S(x)
 
 @testset "inner" begin
     v = StructArray{S}(([1], [1]))
@@ -316,7 +368,7 @@ collect_structarray_rec(t) = collect_structarray(t, initializer = initializer)
 
 @testset "collectnamedtuples" begin
     v = [(a = 1, b = 2), (a = 1, b = 3)]
-    collect_structarray_rec(v) == StructArray((a = Int[1, 1], b = Int[2, 3]))
+    @test collect_structarray_rec(v) == StructArray((a = Int[1, 1], b = Int[2, 3]))
 
     # test inferrability with constant eltype
     itr = [(a = 1, b = 2), (a = 1, b = 2), (a = 1, b = 12)]
@@ -422,34 +474,36 @@ end
     @test isequal(StructArrays.fieldarrays(t)[1], [1, missing, 3])
 end
 
+pair_structarray((first, last)) = StructArray{Pair{eltype(first), eltype(last)}}((first, last))
+
 @testset "collectpairs" begin
     v = (i=>i+1 for i in 1:3)
-    @test collect_structarray_rec(v) == StructArray{Pair{Int, Int}}(([1,2,3], [2,3,4]))
+    @test collect_structarray_rec(v) == pair_structarray([1,2,3] => [2,3,4])
     @test eltype(collect_structarray_rec(v)) == Pair{Int, Int}
 
     v = (i == 1 ? (1.2 => i+1) : (i => i+1) for i in 1:3)
-    @test collect_structarray_rec(v) == StructArray{Pair{Real, Int}}(([1.2,2,3], [2,3,4]))
+    @test collect_structarray_rec(v) == pair_structarray([1.2,2,3] => [2,3,4])
     @test eltype(collect_structarray_rec(v)) == Pair{Real, Int}
 
     v = ((a=i,) => (b="a$i",) for i in 1:3)
-    @test collect_structarray_rec(v) == StructArray(StructArray((a = [1,2,3],)) => StructArray((b = ["a1","a2","a3"],)))
+    @test collect_structarray_rec(v) == pair_structarray(StructArray((a = [1,2,3],)) => StructArray((b = ["a1","a2","a3"],)))
     @test eltype(collect_structarray_rec(v)) == Pair{NamedTuple{(:a,), Tuple{Int64}}, NamedTuple{(:b,), Tuple{String}}}
 
     v = (i == 1 ? (a="1",) => (b="a$i",) : (a=i,) => (b="a$i",) for i in 1:3)
-    @test collect_structarray_rec(v) == StructArray(StructArray((a = ["1",2,3],)) => StructArray((b = ["a1","a2","a3"],)))
+    @test collect_structarray_rec(v) == pair_structarray(StructArray((a = ["1",2,3],)) => StructArray((b = ["a1","a2","a3"],)))
     @test eltype(collect_structarray_rec(v)) == Pair{NamedTuple{(:a,), Tuple{Any}}, NamedTuple{(:b,), Tuple{String}}}
 
     # empty
     v = ((a=i,) => (b="a$i",) for i in 0:-1)
-    @test collect_structarray_rec(v) == StructArray(StructArray((a = Int[],)) => StructArray((b = String[],)))
+    @test collect_structarray_rec(v) == pair_structarray(StructArray((a = Int[],)) => StructArray((b = String[],)))
     @test eltype(collect_structarray_rec(v)) == Pair{NamedTuple{(:a,), Tuple{Int}}, NamedTuple{(:b,), Tuple{String}}}
 
     v = Iterators.filter(t -> t.first.a == 4, ((a=i,) => (b="a$i",) for i in 1:3))
-    @test collect_structarray_rec(v) == StructArray(StructArray((a = Int[],)) => StructArray((b = String[],)))
+    @test collect_structarray_rec(v) == pair_structarray(StructArray((a = Int[],)) => StructArray((b = String[],)))
     @test eltype(collect_structarray_rec(v)) == Pair{NamedTuple{(:a,), Tuple{Int}}, NamedTuple{(:b,), Tuple{String}}}
 
     t = collect_structarray_rec((b = 1,) => (a = i,) for i in (2, missing, 3))
-    s = StructArray(StructArray(b = [1,1,1]) => StructArray(a = [2, missing, 3]))
+    s = pair_structarray(StructArray(b = [1,1,1]) => StructArray(a = [2, missing, 3]))
     @test s[1] == t[1]
     @test ismissing(t[2].second.a)
     @test s[3] == t[3]
@@ -476,26 +530,97 @@ end
     @test sa.a == fill(1, -2:7)
 end
 
+@testset "hasfields" begin
+    @test StructArrays.hasfields(ComplexF64)
+    @test !StructArrays.hasfields(Any)
+    @test StructArrays.hasfields(Tuple{Union{Int, Missing}})
+    @test StructArrays.hasfields(typeof((a=1,)))
+    @test !StructArrays.hasfields(NamedTuple)
+    @test !StructArrays.hasfields(Tuple{Int, Vararg{Int, N}} where {N})
+    @test StructArrays.hasfields(Missing)
+    @test !StructArrays.hasfields(Union{Tuple{Int}, Missing})
+    @test StructArrays.hasfields(Nothing)
+    @test !StructArrays.hasfields(Union{Tuple{Int}, Nothing})
+end
+
 @testset "reshape" begin
     s = StructArray(a=[1,2,3,4], b=["a","b","c","d"])
     rs = reshape(s, (2, 2))
     @test rs.a == [1 3; 2 4]
     @test rs.b == ["a" "c"; "b" "d"]
-
-    os = reshape(s, -1:2)
-    @test os.a == OffsetArray([1,2,3,4], -2)
-    @test os.b == OffsetArray(["a","b","c","d"], -2)
 end
 
 @testset "lazy" begin
-    s = StructArray(rand(ComplexF64, 10, 10))
+    s = StructArray{ComplexF64}((rand(10, 10), view(rand(100, 100), 1:10, 1:10)))
     rows = LazyRows(s)
-    @test IndexStyle(rows) isa IndexLinear
+    @test propertynames(rows) == (:re, :im)
+    @test propertynames(rows[1]) == (:re, :im)
+    @test staticschema(typeof(rows)) == staticschema(eltype(rows)) == staticschema(ComplexF64)
+    @test getproperty(rows, 1) isa Matrix{Float64}
+    @test getproperty(rows, :re) isa Matrix{Float64}
+    @test IndexStyle(rows) isa IndexCartesian
+    @test IndexStyle(typeof(rows)) isa IndexCartesian
     @test all(t -> t.re >= 0, s)
     @test all(t -> t.re >= 0, rows)
     rows[13].re = -12
+    rows[13].im = 0
+
+    s = StructArray(rand(ComplexF64, 10, 10))
+    rows = LazyRows(s)
+    @test propertynames(rows) == (:re, :im)
+    @test propertynames(rows[1]) == (:re, :im)
+    @test staticschema(typeof(rows)) == staticschema(eltype(rows)) == staticschema(ComplexF64)
+    @test getproperty(rows, 1) isa Matrix{Float64}
+    @test getproperty(rows, :re) isa Matrix{Float64}
+    @test IndexStyle(rows) isa IndexLinear
+    @test IndexStyle(typeof(rows)) isa IndexLinear
+    @test all(t -> t.re >= 0, s)
+    @test all(t -> t.re >= 0, rows)
+    rows[13].re = -12
+    rows[13].im = 0
     @test !all(t -> t.re >= 0, s)
     @test !all(t -> t.re >= 0, rows)
+
+    @test !all(t -> t.re >= 0, s)
+    @test !all(t -> t.re >= 0, rows)
+    io = IOBuffer()
+    show(io, rows[13])
+    str = String(take!(io))
+    @test str == "LazyRow(re = -12.0, im = 0.0)"
+
+    io = IOBuffer()
+    Base.showarg(io, rows, true)
+    str = String(take!(io))
+    @test str == "LazyRows(::Array{Float64,2}, ::Array{Float64,2}) with eltype LazyRow{Complex{Float64}}"
+    io = IOBuffer()
+    Base.showarg(io, rows, false)
+    str = String(take!(io))
+    @test str == "LazyRows(::Array{Float64,2}, ::Array{Float64,2})"
+
+    s = StructArray((rand(10, 10), rand(10, 10)))
+    rows = LazyRows(s)
+    @test IndexStyle(rows) isa IndexLinear
+    @test IndexStyle(typeof(rows)) isa IndexLinear
+    @test all(t -> StructArrays._getproperty(t, 1) >= 0, s)
+    @test all(t -> getproperty(t, 1) >= 0, rows)
+    setproperty!(rows[13], 1, -12)
+    setproperty!(rows[13], 2, 0)
+    @test !all(t -> StructArrays._getproperty(t, 1) >= 0, s)
+    @test !all(t -> getproperty(t, 1) >= 0, rows)
+
+    io = IOBuffer()
+    show(io, rows[13])
+    str = String(take!(io))
+    @test str == "LazyRow(-12.0, 0.0)"
+
+    io = IOBuffer()
+    Base.showarg(io, rows, true)
+    str = String(take!(io))
+    @test str == "LazyRows(::Array{Float64,2}, ::Array{Float64,2}) with eltype LazyRow{Tuple{Float64,Float64}}"
+    io = IOBuffer()
+    Base.showarg(io, rows, false)
+    str = String(take!(io))
+    @test str == "LazyRows(::Array{Float64,2}, ::Array{Float64,2})"
 end
 
 @testset "refs" begin
@@ -508,4 +633,16 @@ end
     s = WeakRefStrings.StringArray(["a", missing])
     @test StructArrays.refs(s) isa WeakRefStrings.StringArray{Union{WeakRefStrings.WeakRefString{UInt8}, Missing}}
     @test all(isequal.(s, StructArrays.refs(s)))
+end
+
+@testset "show" begin
+    s = StructArray(Complex{Int64}[1+im, 2-im])
+    io = IOBuffer()
+    Base.showarg(io, s, true)
+    str = String(take!(io))
+    @test str == "StructArray(::Array{Int64,1}, ::Array{Int64,1}) with eltype Complex{Int64}"
+    io = IOBuffer()
+    Base.showarg(io, s, false)
+    str = String(take!(io))
+    @test str == "StructArray(::Array{Int64,1}, ::Array{Int64,1})"
 end
